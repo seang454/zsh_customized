@@ -83,74 +83,59 @@ setup_cli_completions() {
     local comp_dir="$HOME/.zsh/completions"
     mkdir -p "$comp_dir"
 
-    # gh uses -s flag: gh completion -s zsh (not positional)
-    if command -v gh &>/dev/null; then
+    # ── Helper: try a command, save if valid compdef ─────
+    _try_comp() {
+        local out="$1"; shift
+        local tool="$1"
         local tmp; tmp=$(mktemp)
-        gh completion -s zsh > "$tmp" 2>/dev/null
+        "$@" > "$tmp" 2>/dev/null
         if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-            mv "$tmp" "$comp_dir/_gh"
-            echo "  ✔ gh"
-        else
-            rm -f "$tmp"
-            echo "  ✘ gh — no valid completion output (skipped)"
+            mv "$tmp" "$out"
+            echo "  ✔ $tool"
+            return 0
         fi
-    fi
+        rm -f "$tmp"
+        echo "  ✘ $tool — no valid completion output (skipped)"
+        return 1
+    }
 
-    local -a completion_zsh_tools=(
-        docker kubectl helm kind k3d minikube stern argocd flux
-        golangci-lint goreleaser hugo operator-sdk
-    )
-    for tool in "${completion_zsh_tools[@]}"; do
-        if command -v "$tool" &>/dev/null; then
-            local tmp; tmp=$(mktemp)
-            "$tool" completion zsh > "$tmp" 2>/dev/null
-            if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-                mv "$tmp" "$comp_dir/_${tool}"
-                echo "  ✔ $tool"
-            else
-                rm -f "$tmp"
-                echo "  ✘ $tool — no valid completion output (skipped)"
-            fi
-        fi
+    # ── GROUP 1: <tool> completion zsh ───────────────────
+    for tool in docker kubectl helm kind k3d minikube stern argocd flux \
+                golangci-lint goreleaser hugo operator-sdk; do
+        command -v "$tool" &>/dev/null && \
+            _try_comp "$comp_dir/_${tool}" "$tool" "$tool" completion zsh
     done
 
-    local -a completions_zsh_tools=(
-        rustup cargo volta fnm poetry pipx rye uv just mise
-        vault consul nomad packer waypoint
-    )
-    for tool in "${completions_zsh_tools[@]}"; do
-        if command -v "$tool" &>/dev/null; then
-            local tmp; tmp=$(mktemp)
-            "$tool" completions zsh > "$tmp" 2>/dev/null
-            if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-                mv "$tmp" "$comp_dir/_${tool}"
-                echo "  ✔ $tool"
-            else
-                rm -f "$tmp"
-            fi
-        fi
+    # ── GROUP 2: gh — completion -s zsh ──────────────────
+    command -v gh &>/dev/null && \
+        _try_comp "$comp_dir/_gh" gh gh completion -s zsh
+
+    # ── GROUP 3: <tool> completions zsh ──────────────────
+    for tool in rustup cargo volta fnm poetry pipx rye \
+                just mise vault consul nomad packer waypoint; do
+        command -v "$tool" &>/dev/null && \
+            _try_comp "$comp_dir/_${tool}" "$tool" "$tool" completions zsh
     done
 
-    local -a flag_completion_tools=(rg fd)
-    for tool in "${flag_completion_tools[@]}"; do
-        if command -v "$tool" &>/dev/null; then
-            local tmp; tmp=$(mktemp)
-            { "$tool" --generate=complete-zsh 2>/dev/null || \
-              "$tool" --completion=zsh 2>/dev/null; } > "$tmp"
-            if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-                mv "$tmp" "$comp_dir/_${tool}"
-                echo "  ✔ $tool"
-            else
-                rm -f "$tmp"
-            fi
-        fi
-    done
+    # ── GROUP 4: uv — generate-shell-completion zsh ──────
+    command -v uv &>/dev/null && \
+        _try_comp "$comp_dir/_uv" uv uv generate-shell-completion zsh
 
+    # ── GROUP 5: rg — --generate=complete-zsh ────────────
+    command -v rg &>/dev/null && \
+        _try_comp "$comp_dir/_rg" rg rg --generate=complete-zsh
+
+    # ── GROUP 6: fd — --gen-completions zsh ──────────────
+    command -v fd &>/dev/null && \
+        _try_comp "$comp_dir/_fd" fd fd --gen-completions zsh
+
+    # ── GROUP 7: terraform — -install-autocomplete ───────
     if command -v terraform &>/dev/null; then
         terraform -install-autocomplete 2>/dev/null || true
         echo "  ✔ terraform (via -install-autocomplete)"
     fi
 
+    # ── GROUP 8: aws — aws_completer binary ──────────────
     if command -v aws &>/dev/null; then
         cat > "$comp_dir/_aws" << 'AWSEOF'
 #compdef aws
@@ -159,14 +144,17 @@ AWSEOF
         echo "  ✔ aws"
     fi
 
+    # ── GROUP 9: az — argcomplete ─────────────────────────
     if command -v az &>/dev/null; then
         local az_comp
         az_comp=$(python3 -c "import argcomplete; print(argcomplete.__file__)" 2>/dev/null)
         if [[ -n "$az_comp" ]]; then
-            register-python-argcomplete az > "$comp_dir/_az" 2>/dev/null && echo "  ✔ az" || true
+            register-python-argcomplete az > "$comp_dir/_az" 2>/dev/null && \
+                echo "  ✔ az" || true
         fi
     fi
 
+    # ── GROUP 10: gcloud — symlink from sdk ──────────────
     if command -v gcloud &>/dev/null; then
         local gcloud_comp
         gcloud_comp=$(gcloud info --format='value(installation.sdk_root)' 2>/dev/null)
@@ -175,6 +163,8 @@ AWSEOF
                 echo "  ✔ gcloud" || true
         fi
     fi
+
+    unset -f _try_comp
 
     echo "✔ CLI completions generated in $comp_dir"
     echo "  Run 'compinit_refresh' after installing new tools to register their completions."
@@ -1319,58 +1309,59 @@ compinit_refresh() {
         fi
     done
 
-    for tool in gh docker kubectl helm kind k3d minikube stern argocd flux golangci-lint goreleaser hugo operator-sdk; do
-        if command -v "$tool" &>/dev/null; then
-            local tmp=$(mktemp)
-            if [[ "$tool" == "gh" ]]; then
-                "$tool" completion -s zsh > "$tmp" 2>/dev/null
-            else
-                "$tool" completion zsh > "$tmp" 2>/dev/null
-            fi
-            if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-                mv "$tmp" "$comp_dir/_${tool}"
-                echo "  ✔ $tool"
-                (( added++ ))
-            else
-                rm -f "$tmp" "$comp_dir/_${tool}"
-                echo "  ✘ $tool — completion output invalid (skipped)"
-            fi
+    # Helper function
+    _rc_try() {
+        local out="$1" tool="$2"; shift 2
+        local tmp; tmp=$(mktemp)
+        "$@" > "$tmp" 2>/dev/null
+        if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
+            mv "$tmp" "$out"
+            echo "  ✔ $tool"
+            (( added++ ))
+            return 0
         fi
+        rm -f "$tmp"
+        return 1
+    }
+
+    # GROUP 1: <tool> completion zsh
+    for tool in docker kubectl helm kind k3d minikube stern argocd flux \
+                golangci-lint goreleaser hugo operator-sdk; do
+        command -v "$tool" &>/dev/null || continue
+        _rc_try "$comp_dir/_${tool}" "$tool" "$tool" completion zsh || \
+            echo "  ✘ $tool — completion output invalid (skipped)"
     done
 
-    for tool in rustup cargo volta fnm poetry pipx rye uv just mise vault consul nomad packer; do
-        if command -v "$tool" &>/dev/null; then
-            local tmp=$(mktemp)
-            "$tool" completions zsh > "$tmp" 2>/dev/null
-            if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-                mv "$tmp" "$comp_dir/_${tool}"
-                echo "  ✔ $tool"
-                (( added++ ))
-            else
-                rm -f "$tmp" "$comp_dir/_${tool}"
-            fi
-        fi
+    # GROUP 2: gh — completion -s zsh
+    if command -v gh &>/dev/null; then
+        _rc_try "$comp_dir/_gh" gh gh completion -s zsh || \
+            echo "  ✘ gh — completion output invalid (skipped)"
+    fi
+
+    # GROUP 3: <tool> completions zsh
+    for tool in rustup cargo volta fnm poetry pipx rye \
+                just mise vault consul nomad packer waypoint; do
+        command -v "$tool" &>/dev/null || continue
+        _rc_try "$comp_dir/_${tool}" "$tool" "$tool" completions zsh
     done
 
+    # GROUP 4: uv — generate-shell-completion zsh
+    if command -v uv &>/dev/null; then
+        _rc_try "$comp_dir/_uv" uv uv generate-shell-completion zsh || \
+            echo "  ✘ uv — completion output invalid (skipped)"
+    fi
+
+    # GROUP 5: rg — --generate=complete-zsh
     if command -v rg &>/dev/null; then
-        local tmp=$(mktemp)
-        rg --generate=complete-zsh > "$tmp" 2>/dev/null
-        if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-            mv "$tmp" "$comp_dir/_rg" && echo "  ✔ rg" && (( added++ ))
-        else
-            rm -f "$tmp"
-        fi
+        _rc_try "$comp_dir/_rg" rg rg --generate=complete-zsh
     fi
 
+    # GROUP 6: fd — --gen-completions zsh
     if command -v fd &>/dev/null; then
-        local tmp=$(mktemp)
-        fd --gen-completions zsh > "$tmp" 2>/dev/null
-        if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-            mv "$tmp" "$comp_dir/_fd" && echo "  ✔ fd" && (( added++ ))
-        else
-            rm -f "$tmp"
-        fi
+        _rc_try "$comp_dir/_fd" fd fd --gen-completions zsh
     fi
+
+    unset -f _rc_try
 
     rm -f ~/.zcompdump
     autoload -Uz compinit && compinit
@@ -1398,23 +1389,56 @@ register_completion() {
     local tmp ok=0
     tmp=$(mktemp)
 
+    # ── Try a command, return 0 if output is a valid compdef ──
     _try_write() {
         local out="$1"; shift
         "$@" > "$out" 2>/dev/null
         [[ -s "$out" ]] && grep -qE '(#compdef|compdef )' "$out"
     }
 
-    if [[ "$method" == "auto" || "$method" == "zsh" ]]; then
-        _try_write "$tmp" "$tool" completion zsh && ok=1
-    fi
-    if [[ $ok -eq 0 && ( "$method" == "auto" || "$method" == "completions" ) ]]; then
-        _try_write "$tmp" "$tool" completions zsh && ok=1
-    fi
-    if [[ $ok -eq 0 && ( "$method" == "auto" || "$method" == "flag" ) ]]; then
-        _try_write "$tmp" "$tool" --completion=zsh && ok=1
-    fi
-    if [[ $ok -eq 0 && "$method" == "auto" ]]; then
-        _try_write "$tmp" "$tool" --generate=complete-zsh && ok=1
+    if [[ "$method" == "auto" ]]; then
+        # Try every known completion syntax in order.
+        # Works for any tool — known or unknown.
+        local -a attempts=(
+            # Standard patterns used by most modern tools
+            "$tool completion zsh"
+            "$tool completions zsh"
+            "$tool completion --shell zsh"
+            "$tool completions --shell zsh"
+            "$tool completion -s zsh"
+            "$tool completions -s zsh"
+            # Flag-based patterns
+            "$tool --completion=zsh"
+            "$tool --completion zsh"
+            "$tool --generate=complete-zsh"
+            "$tool --gen-completions=zsh"
+            "$tool --gen-completions zsh"
+            # Subcommand-based patterns
+            "$tool generate-shell-completion zsh"
+            "$tool generate completion zsh"
+            "$tool shell-completion zsh"
+            "$tool shell completion zsh"
+            "$tool init completions zsh"
+            "$tool complete --shell=zsh"
+            "$tool complete -s zsh"
+            "$tool zsh-completion"
+            "$tool zsh_completion"
+        )
+
+        for attempt in "${attempts[@]}"; do
+            if [[ $ok -eq 0 ]]; then
+                _try_write "$tmp" ${=attempt} && ok=1
+            fi
+        done
+    else
+        # Manual override
+        case "$method" in
+            zsh)         _try_write "$tmp" "$tool" completion zsh && ok=1 ;;
+            completions) _try_write "$tmp" "$tool" completions zsh && ok=1 ;;
+            flag)        _try_write "$tmp" "$tool" --completion=zsh && ok=1 ;;
+            generate)    _try_write "$tmp" "$tool" generate-shell-completion zsh && ok=1 ;;
+            shell)       _try_write "$tmp" "$tool" completion --shell zsh && ok=1 ;;
+        esac
     fi
 
     if [[ $ok -eq 1 ]]; then
@@ -1427,12 +1451,12 @@ register_completion() {
         rm -f "$tmp"
         echo "✗ Could not generate a valid completion for '$tool'."
         echo ""
-        echo "  Options:"
-        echo "    1. Put a completion file manually at: ~/.zsh/completions/_${tool}"
-        echo "    2. Try these commands to see which works:"
-        echo "         $tool completion zsh"
-        echo "         $tool completions zsh"
-        echo "         $tool --completion=zsh"
+        echo "  Tried all known methods automatically."
+        echo "  Find the correct command with:"
+        echo "    $tool --help | grep -i complet"
+        echo "  Then register manually:"
+        echo "    <correct command> > ~/.zsh/completions/_${tool}"
+        echo "    compinit_refresh"
     fi
 
     unfunction _try_write 2>/dev/null
