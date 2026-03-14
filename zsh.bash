@@ -16,44 +16,34 @@ backup_zshrc() {
     fi
 }
 
-# ─────────────────────────────────────────────
-# INSTALL PACKAGES
-# ─────────────────────────────────────────────
-
 install_packages() {
     print_step "Installing system dependencies..."
     sudo apt-get update -y -qq
     sudo apt-get install -y zsh git curl wget fzf unzip build-essential nodejs npm || true
 
-    # bat (syntax-highlighted cat)
     if ! command -v bat &>/dev/null && ! command -v batcat &>/dev/null; then
         sudo apt-get install -y bat 2>/dev/null || true
     fi
 
-    # eza (modern ls replacement)
     if ! command -v eza &>/dev/null; then
         sudo apt-get install -y eza 2>/dev/null || \
         (wget -q "https://github.com/eza-community/eza/releases/latest/download/eza_x86_64-unknown-linux-gnu.tar.gz" \
             -O /tmp/eza.tar.gz && tar -xzf /tmp/eza.tar.gz -C /tmp && sudo mv /tmp/eza /usr/local/bin/eza) || true
     fi
 
-    # zoxide (smarter cd with frecency)
     if ! command -v zoxide &>/dev/null; then
         curl -sSfL https://raw.githubusercontent.com/ajeetdsouza/zoxide/main/install.sh | sh || true
     fi
 
-    # thefuck (autocorrect mistyped commands)
     if ! command -v thefuck &>/dev/null; then
         sudo apt-get install -y python3-pip 2>/dev/null || true
         pip3 install thefuck --quiet 2>/dev/null || true
     fi
 
-    # tldr (community man pages)
     if ! command -v tldr &>/dev/null; then
         sudo apt-get install -y tldr 2>/dev/null || sudo npm install -g tldr 2>/dev/null || true
     fi
 
-    # delta (better git diffs)
     if ! command -v delta &>/dev/null; then
         DELTA_VER=$(curl -s "https://api.github.com/repos/dandavison/delta/releases/latest" \
             | grep -Po '"tag_name": "\K[^"]+' 2>/dev/null || echo "0.16.5")
@@ -61,7 +51,6 @@ install_packages() {
             -O /tmp/delta.deb 2>/dev/null && sudo dpkg -i /tmp/delta.deb 2>/dev/null || true
     fi
 
-    # gh (GitHub CLI)
     if ! command -v gh &>/dev/null; then
         curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
             | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null && \
@@ -73,24 +62,20 @@ install_packages() {
     echo "✔ Packages installed."
 }
 
-# ─────────────────────────────────────────────
-# AUTO-GENERATE CLI COMPLETIONS
-# ─────────────────────────────────────────────
-
 setup_cli_completions() {
     print_step "Generating CLI completions for installed tools..."
 
     local comp_dir="$HOME/.zsh/completions"
     mkdir -p "$comp_dir"
 
-    # ── Helper: try a command, save if valid compdef ─────
     _try_comp() {
         local out="$1"; shift
         local tool="$1"
         local tmp; tmp=$(mktemp)
-        "$@" > "$tmp" 2>/dev/null
+        # Run under zsh to match user environment and PATH
+        zsh -c "$* > '$tmp' 2>/dev/null" 2>/dev/null
         if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-            mv "$tmp" "$out"
+            mv -f "$tmp" "$out"
             echo "  ✔ $tool"
             return 0
         fi
@@ -110,12 +95,32 @@ setup_cli_completions() {
     command -v gh &>/dev/null && \
         _try_comp "$comp_dir/_gh" gh gh completion -s zsh
 
+    # ── GROUP 2.5: <tool> --completions zsh ──────────────
+    # just uses --completions (double-dash flag), not a subcommand
+    for tool in just; do
+        command -v "$tool" &>/dev/null && \
+            _try_comp "$comp_dir/_${tool}" "$tool" "$tool" --completions zsh
+    done
+
     # ── GROUP 3: <tool> completions zsh ──────────────────
-    for tool in rustup cargo volta fnm poetry pipx rye \
-                just mise vault consul nomad packer waypoint; do
+    for tool in rustup cargo volta fnm poetry rye \
+                mise vault consul nomad packer waypoint; do
         command -v "$tool" &>/dev/null && \
             _try_comp "$comp_dir/_${tool}" "$tool" "$tool" completions zsh
     done
+
+    # ── GROUP 3.5: pipx — register-python-argcomplete ────
+    # pipx does not generate a compdef via 'pipx completions zsh'
+    # it requires register-python-argcomplete instead
+    if command -v pipx &>/dev/null && command -v register-python-argcomplete &>/dev/null; then
+        register-python-argcomplete pipx > "$comp_dir/_pipx" 2>/dev/null
+        if grep -qE '(#compdef|compdef )' "$comp_dir/_pipx" 2>/dev/null; then
+            echo "  ✔ pipx"
+        else
+            rm -f "$comp_dir/_pipx"
+            echo "  ✘ pipx — argcomplete failed (skipped)"
+        fi
+    fi
 
     # ── GROUP 4: uv — generate-shell-completion zsh ──────
     command -v uv &>/dev/null && \
@@ -159,19 +164,25 @@ AWSEOF
     # that must be sourced at shell startup. We write a source line into
     # ~/.zshrc_custom so it loads automatically on every new shell.
     if command -v gcloud &>/dev/null; then
-        local gcloud_sdk
+        local gcloud_sdk gcloud_inc
         gcloud_sdk=$(gcloud info --format='value(installation.sdk_root)' 2>/dev/null)
-        if [[ -n "$gcloud_sdk" ]] && [[ -f "$gcloud_sdk/completion.zsh.inc" ]]; then
-            local gcloud_line="[[ -f '$gcloud_sdk/completion.zsh.inc' ]] && source '$gcloud_sdk/completion.zsh.inc'"
+        gcloud_inc="${gcloud_sdk}/completion.zsh.inc"
+        # Fallback: sdk_root metadata may be wrong on Debian/Ubuntu apt installs
+        if [[ ! -f "$gcloud_inc" ]]; then
+            gcloud_inc=$(find /usr/share/google-cloud-sdk /usr/lib/google-cloud-sdk \
+                -name "completion.zsh.inc" 2>/dev/null | head -1)
+        fi
+        if [[ -f "$gcloud_inc" ]]; then
+            local gcloud_line="[[ -f '$gcloud_inc' ]] && source '$gcloud_inc'"
             if ! grep -qF 'completion.zsh.inc' "$CUSTOM_CONFIG" 2>/dev/null; then
                 echo "" >> "$CUSTOM_CONFIG"
                 echo "# ── gcloud completion ───────────────────────────────" >> "$CUSTOM_CONFIG"
                 echo "$gcloud_line" >> "$CUSTOM_CONFIG"
             fi
-            echo "  ✔ gcloud (sourced from SDK)"
+            echo "  ✔ gcloud (sourced from $gcloud_inc)"
         else
             echo "  ✘ gcloud — SDK completion file not found (skipped)"
-            echo "    Run: gcloud info --format='value(installation.sdk_root)' to verify"
+            echo "    Run: find / -name 'completion.zsh.inc' 2>/dev/null"
         fi
     fi
 
@@ -180,10 +191,6 @@ AWSEOF
     echo "✔ CLI completions generated in $comp_dir"
     echo "  Run 'compinit_refresh' after installing new tools to register their completions."
 }
-
-# ─────────────────────────────────────────────
-# OH MY ZSH
-# ─────────────────────────────────────────────
 
 install_oh_my_zsh() {
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
@@ -194,10 +201,6 @@ install_oh_my_zsh() {
         echo "✔ Oh My Zsh already present."
     fi
 }
-
-# ─────────────────────────────────────────────
-# PLUGINS
-# ─────────────────────────────────────────────
 
 install_plugins() {
     print_step "Installing Zsh plugins..."
@@ -229,10 +232,6 @@ install_plugins() {
     sed -i 's/^plugins=.*/plugins=(git zsh-autosuggestions zsh-syntax-highlighting zsh-history-substring-search zsh-autopair zsh-nvm fzf-tab zsh-completions forgit zsh-you-should-use zsh-better-npm-completion)/' "$HOME/.zshrc"
     echo "✔ Plugins installed."
 }
-
-# ─────────────────────────────────────────────
-# POWERLEVEL10K THEME
-# ─────────────────────────────────────────────
 
 install_powerlevel10k() {
     print_step "Installing Powerlevel10k theme..."
@@ -290,10 +289,6 @@ P10K_EOF
     echo "✔ Powerlevel10k installed. Run 'p10k configure' for interactive setup."
 }
 
-# ─────────────────────────────────────────────
-# CUSTOM CONFIG BLOCK
-# ─────────────────────────────────────────────
-
 write_custom_config() {
     print_step "Writing custom Zsh configuration to ~/.zshrc_custom..."
 
@@ -331,8 +326,14 @@ if [[ -n ~/.zcompdump(#qN.mh+24) ]]; then compinit; else compinit -C; fi
 # ── gcloud completion (sourced from SDK — not compdef based) ─
 if command -v gcloud &>/dev/null; then
   _gcloud_sdk=$(gcloud info --format='value(installation.sdk_root)' 2>/dev/null)
-  [[ -f "$_gcloud_sdk/completion.zsh.inc" ]] && source "$_gcloud_sdk/completion.zsh.inc"
-  unset _gcloud_sdk
+  _gcloud_inc="${_gcloud_sdk}/completion.zsh.inc"
+  # Fallback: sdk_root metadata may be wrong on Debian/Ubuntu apt installs
+  if [[ ! -f "$_gcloud_inc" ]]; then
+    _gcloud_inc=$(find /usr/share/google-cloud-sdk /usr/lib/google-cloud-sdk \
+      -name "completion.zsh.inc" 2>/dev/null | head -1)
+  fi
+  [[ -f "$_gcloud_inc" ]] && source "$_gcloud_inc"
+  unset _gcloud_sdk _gcloud_inc
 fi
 
 # ── No-matches handler ───────────────────────────────
@@ -965,7 +966,6 @@ _systemctl_custom() {
 }
 compdef _systemctl_custom systemctl
 
-# ── FIX: apt case patterns on single lines to avoid parse errors ──
 _apt_custom() {
     local -a subcmds
     subcmds=(
@@ -1048,7 +1048,6 @@ _apt_custom() {
         '--all-versions[list all available versions]'
         {-a,--all-versions}'[show all versions]'
     )
-    # FIX: all case patterns on single lines (no multi-line patterns)
     case "$words[2]" in
         install) _arguments -s $install_opts ;;
         remove|purge) _arguments -s ${global_opts[@]} '*:package:->pkg' ;;
@@ -1306,7 +1305,6 @@ sshkey() {
     echo "Public key:"; cat ~/.ssh/"${name}.pub"
 }
 
-# FIX: renamed from gi() to gitignore() to avoid conflict with oh-my-zsh git plugin alias
 gitignore() { curl -sL "https://www.toptal.com/developers/gitignore/api/$*"; }
 
 compinit_refresh() {
@@ -1327,13 +1325,13 @@ compinit_refresh() {
         fi
     done
 
-    # Helper function
     _rc_try() {
         local out="$1" tool="$2"; shift 2
         local tmp; tmp=$(mktemp)
-        "$@" > "$tmp" 2>/dev/null
+        # Run under zsh to match user environment and PATH
+        zsh -c "$* > '$tmp' 2>/dev/null" 2>/dev/null
         if [[ -s "$tmp" ]] && grep -qE '(#compdef|compdef )' "$tmp"; then
-            mv "$tmp" "$out"
+            mv -f "$tmp" "$out"
             echo "  ✔ $tool"
             (( added++ ))
             return 0
@@ -1356,12 +1354,34 @@ compinit_refresh() {
             echo "  ✘ gh — completion output invalid (skipped)"
     fi
 
+    # GROUP 2.5: <tool> --completions zsh
+    # just uses --completions (double-dash flag), not a subcommand
+    for tool in just; do
+        command -v "$tool" &>/dev/null || continue
+        _rc_try "$comp_dir/_${tool}" "$tool" "$tool" --completions zsh || \
+            echo "  ✘ $tool — completion output invalid (skipped)"
+    done
+
     # GROUP 3: <tool> completions zsh
-    for tool in rustup cargo volta fnm poetry pipx rye \
-                just mise vault consul nomad packer waypoint; do
+    for tool in rustup cargo volta fnm poetry rye \
+                mise vault consul nomad packer waypoint; do
         command -v "$tool" &>/dev/null || continue
         _rc_try "$comp_dir/_${tool}" "$tool" "$tool" completions zsh
     done
+
+    # GROUP 3.5: pipx — register-python-argcomplete
+    if command -v pipx &>/dev/null && command -v register-python-argcomplete &>/dev/null; then
+        local _pipx_tmp; _pipx_tmp=$(mktemp)
+        register-python-argcomplete pipx > "$_pipx_tmp" 2>/dev/null
+        if grep -qE '(#compdef|compdef )' "$_pipx_tmp" 2>/dev/null; then
+            mv -f "$_pipx_tmp" "$comp_dir/_pipx"
+            echo "  ✔ pipx"
+            (( added++ ))
+        else
+            rm -f "$_pipx_tmp"
+            echo "  ✘ pipx — argcomplete failed (skipped)"
+        fi
+    fi
 
     # GROUP 4: uv — generate-shell-completion zsh
     if command -v uv &>/dev/null; then
@@ -1381,11 +1401,20 @@ compinit_refresh() {
 
     # gcloud — re-source from SDK (not compdef based)
     if command -v gcloud &>/dev/null; then
-        local _sdk
+        local _sdk _inc
         _sdk=$(gcloud info --format='value(installation.sdk_root)' 2>/dev/null)
-        if [[ -f "$_sdk/completion.zsh.inc" ]]; then
-            source "$_sdk/completion.zsh.inc"
-            echo "  ✔ gcloud (re-sourced from SDK)"
+        _inc="${_sdk}/completion.zsh.inc"
+        # Fallback: sdk_root metadata may be wrong on Debian/Ubuntu apt installs
+        if [[ ! -f "$_inc" ]]; then
+            _inc=$(find /usr/share/google-cloud-sdk /usr/lib/google-cloud-sdk \
+                -name "completion.zsh.inc" 2>/dev/null | head -1)
+        fi
+        if [[ -f "$_inc" ]]; then
+            source "$_inc"
+            echo "  ✔ gcloud (re-sourced from $_inc)"
+        else
+            echo "  ✘ gcloud — completion file not found"
+            echo "    Run: find / -name 'completion.zsh.inc' 2>/dev/null"
         fi
     fi
 
@@ -1416,15 +1445,21 @@ register_completion() {
 
     # ── Special case: gcloud uses source, not compdef ──
     if [[ "$tool" == "gcloud" ]]; then
-        local _sdk
+        local _sdk _inc
         _sdk=$(gcloud info --format='value(installation.sdk_root)' 2>/dev/null)
-        if [[ -f "$_sdk/completion.zsh.inc" ]]; then
-            source "$_sdk/completion.zsh.inc"
-            echo "✔ 'gcloud' completion loaded (sourced from SDK)."
+        _inc="${_sdk}/completion.zsh.inc"
+        # Fallback: sdk_root metadata may be wrong on Debian/Ubuntu apt installs
+        if [[ ! -f "$_inc" ]]; then
+            _inc=$(find /usr/share/google-cloud-sdk /usr/lib/google-cloud-sdk \
+                -name "completion.zsh.inc" 2>/dev/null | head -1)
+        fi
+        if [[ -f "$_inc" ]]; then
+            source "$_inc"
+            echo "✔ 'gcloud' completion loaded from: $_inc"
             echo "  It is already configured in ~/.zshrc_custom to load automatically."
         else
             echo "✗ gcloud SDK completion file not found."
-            echo "  Expected: $_sdk/completion.zsh.inc"
+            echo "  Run: find / -name 'completion.zsh.inc' 2>/dev/null"
         fi
         return
     fi
@@ -1432,7 +1467,6 @@ register_completion() {
     local tmp ok=0
     tmp=$(mktemp)
 
-    # ── Try a command, return 0 if output is a valid compdef ──
     _try_write() {
         local out="$1"; shift
         "$@" > "$out" 2>/dev/null
@@ -1442,6 +1476,7 @@ register_completion() {
     if [[ "$method" == "auto" ]]; then
         local -a attempts=(
             "$tool completion zsh"
+            "$tool --completions zsh"
             "$tool completions zsh"
             "$tool completion --shell zsh"
             "$tool completions --shell zsh"
@@ -1479,7 +1514,7 @@ register_completion() {
     fi
 
     if [[ $ok -eq 1 ]]; then
-        mv "$tmp" "$comp_dir/_${tool}"
+        mv -f "$tmp" "$comp_dir/_${tool}"
         rm -f ~/.zcompdump
         autoload -Uz compinit && compinit -C
         echo "✔ '$tool' completion registered."
@@ -1539,10 +1574,6 @@ ZSHRC_EOF
     echo "✔ Custom config written to $CUSTOM_CONFIG"
 }
 
-# ─────────────────────────────────────────────
-# WIRE INTO .zshrc
-# ─────────────────────────────────────────────
-
 wire_custom_config() {
     local marker="# >>> zsh-setup custom config <<<"
     if ! grep -q "$marker" "$HOME/.zshrc" 2>/dev/null; then
@@ -1562,9 +1593,6 @@ set_default_shell() {
     sudo usermod --shell "$shell_path" "$USER"
     echo "✔ Default shell → $shell_path"
 
-    # ── VS Code / bash auto-switch to zsh ────────────
-    # VS Code Remote SSH hardcodes bash — this makes bash
-    # immediately replace itself with zsh on every new terminal
     local bashrc="$HOME/.bashrc"
     local marker="# >>> auto-switch to zsh <<<"
     if ! grep -q "$marker" "$bashrc" 2>/dev/null; then
@@ -1580,10 +1608,6 @@ BASHRC_EOF
         echo "✔ VS Code bash→zsh auto-switch already present"
     fi
 }
-
-# ─────────────────────────────────────────────
-# MAIN INSTALL
-# ─────────────────────────────────────────────
 
 install_zsh() {
     echo ""
@@ -1624,10 +1648,6 @@ install_zsh() {
     echo ""
     exec zsh
 }
-
-# ─────────────────────────────────────────────
-# REMOVE
-# ─────────────────────────────────────────────
 
 remove_zsh() {
     echo "╔═══════════════════════════════════════════════╗"
